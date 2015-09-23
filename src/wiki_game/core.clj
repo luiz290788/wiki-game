@@ -18,12 +18,12 @@
 
 (defn extract-links
   [parsed-html]
-  (map #(get (:attrs %) :href) (select parsed-html [:#content (attr-starts :href "/wiki")])))
+  (map #(get (:attrs %) :href) (select parsed-html [(attr-starts :href "/wiki")])))
 
 
 (defn get-body
   [url]
-  (:body @(http/get (str "https://en.wikipedia.org" url))))
+  (:body @(http/get (str "http://thewikigame.com" url) {:headers {"Cookie" "sessionid=jkpxxzzvbovx9xgcma2il0q1yueswc8n; "}})))
 
 (defn create-vertex
   [origin dest]
@@ -35,9 +35,6 @@
     (get-body)
     (parse-html)
     (extract-links)
-    (map normalize-url)
-    (filter #(not (.startsWith % "/wiki/Template:")))
-    (filter #(not (.startsWith % "/wiki/File:")))
     (set))
   )
 
