@@ -54,7 +54,7 @@
 (defn links-async
   [url]
   (let [output (a/chan)]
-    (a/pipeline-blocking 1 output
+    (a/pipeline 10 output
                 (comp (map parse-html)
                       (map extract-links)
                       (mapcat distinct)
@@ -64,6 +64,25 @@
                 (get-body-async url))
     output))
 
+(defn level-links
+  [sources]
+  (a/merge (map #(links-async %) sources)))
+
+(defn next-level-graph-and-links
+  [links]
+  (a/go-loop
+        [current-level-graph {}
+         next-level-links []
+         links-chan (level-links links)
+         c-link (a/<! links-chan)]
+        (if (nil? c-link)
+          [current-level-graph next-level-links]
+          (recur (assoc current-level-graph (second c-link) (first c-link))
+                 (conj next-level-links (second c-link))
+                 links-chan
+                 (a/<! links-chan)))
+        ))
+
 (defn build-graph
   [start end]
   (let 
@@ -71,19 +90,20 @@
      normalized-end (normalize-url end)]
     (a/>!! to-do [nil (normalize-url start)])
     (a/<!! (a/go-loop 
-             [[from current-path] (a/<! to-do)
-              links-graph {}]
-             (if (nil? to-do)
-               nil
-               (if (contains? links-graph normalized-end)
-                 links-graph
-                 (if (contains? links-graph current-path)
-                   (recur (a/<! to-do) links-graph)
-                   (let [links-chan (links-async current-path)]
-                     (a/pipe links-chan to-do false)
-                     (if (not (nil? from))
-                       (recur (a/<! to-do) (assoc links-graph current-path from))
-                       (recur (a/<! to-do) links-graph))))))))))
+             [links-graph {}
+              level-links [(normalize-url start)]
+              next-level-chan (next-level-graph-and-links level-links)]
+             (let [next-level (a/<! next-level-chan)]
+               (if (not (nil? next-level))
+                 (let [merged-graph (merge (first next-level) links-graph)
+                       nll (filter #(not (contains? links-graph %)) (second next-level))]
+                   (if (contains? merged-graph normalized-end)
+                     merged-graph
+                     (recur merged-graph
+                            nll
+                            (next-level-graph-and-links (second next-level)))))))
+             ))
+    ))
 
 
 (defn wikipedia-min-path
