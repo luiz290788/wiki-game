@@ -96,7 +96,8 @@
              (let [next-level (a/<! next-level-chan)]
                (if (not (nil? next-level))
                  (let [merged-graph (merge (first next-level) links-graph)
-                       nll (filter #(not (contains? links-graph %)) (second next-level))]
+                       nll (filter #(not (contains? links-graph %)) (distinct (second next-level)))]
+                   (println (count nll))
                    (if (contains? merged-graph normalized-end)
                      merged-graph
                      (recur merged-graph
