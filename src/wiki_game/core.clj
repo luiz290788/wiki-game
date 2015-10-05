@@ -1,6 +1,6 @@
 (ns wiki-game.core
-  (:require [org.httpkit.client :as http]
-            [clojure.core.async :as a])
+  (:require [clojure.core.async :as a]
+            [clj-http.client :as client])
   (:use [net.cgrand.enlive-html]))
 
 (defn parse-html
@@ -10,51 +10,31 @@
 (defn normalize-url
   [url]
   (let [hash-index (.indexOf url "#")]
-    (.toLowerCase (if (>= hash-index 0)
-                    (.substring url 0 hash-index)
-                    url
-                    ))
-    )
-  )
+    (if (>= hash-index 0)
+      (.substring url 0 hash-index)
+      url)))
 
 (defn extract-links
   [parsed-html]
   (map #(get (:attrs %) :href) (select parsed-html [(attr-starts :href "/wiki")])))
 
 
-(defn get-body
-  [url]
-  (:body @(http/get (str "http://thewikigame.com" url) {:headers {"Cookie" "sessionid=jkpxxzzvbovx9xgcma2il0q1yueswc8n; "}})))
-
 (defn get-body-async
   [url]
-  (let [body-chan (a/chan)]
-    (a/go
-      (let [body (get-body url)]
-        (if (not (nil? body))
-          (a/>! body-chan body))
-        (a/close! body-chan)))
-    body-chan)
-  )
+  (a/thread 
+    (try (:body (client/get (str "http://thewikigame.com" url) 
+                             {:headers {"Cookie" "sessionid=jkpxxzzvbovx9xgcma2il0q1yueswc8n;"}}))
+      (catch Exception e nil))
+    ))
 
 (defn create-vertex
   [origin dest]
   {dest origin})
 
-(defn links
-  [url]
-  (->> url
-    (get-body)
-    (parse-html)
-    (extract-links)
-    (set)
-    (map #(conj [url] %)))
-  )
-
 (defn links-async
   [url]
   (let [output (a/chan)]
-    (a/pipeline 10 output
+    (a/pipeline 100 output
                 (comp (map parse-html)
                       (map extract-links)
                       (mapcat distinct)
@@ -66,22 +46,65 @@
 
 (defn level-links
   [sources]
-  (a/merge (map #(links-async %) sources)))
+  (let 
+    [dsource (distinct sources)
+     level-chan (a/chan)
+     ack (a/chan 200)
+     requests-count (a/chan 200)]
+    (a/go-loop
+      [c 0]
+      (let 
+        [fr (a/<! requests-count)
+         plus-one (inc c)]
+        (if (< plus-one (count dsource))
+          (recur plus-one)
+          (a/close! level-chan))))
+    (a/go-loop 
+      [q dsource]
+      (if q
+        (let 
+          [signal (a/<! ack)]
+          (if signal
+            (let [] 
+              (a/go
+                (loop
+                  [path-links (links-async (first q))
+                   link (a/<! path-links)]
+                  (if (not (nil? link))
+                    (let []
+                      (a/>! level-chan link)
+                      (recur path-links (a/<! path-links)))
+                    (let []
+                      (a/>! requests-count true)
+                      (a/>! ack true)))))
+              (recur (next q)))))))
+    (a/go-loop 
+      [c 50]
+      (if (> c 0)
+        (let []
+          (a/>! ack true)
+          (recur (dec c)))))
+    level-chan)
+  )
 
 (defn next-level-graph-and-links
-  [links]
+  [links end]
   (a/go-loop
-        [current-level-graph {}
-         next-level-links []
-         links-chan (level-links links)
-         c-link (a/<! links-chan)]
-        (if (nil? c-link)
-          [current-level-graph next-level-links]
-          (recur (assoc current-level-graph (second c-link) (first c-link))
-                 (conj next-level-links (second c-link))
+    [current-level-graph {}
+     next-level-links []
+     links-chan (level-links links)
+     c-link (a/<! links-chan)]
+    (if (nil? c-link)
+      [current-level-graph next-level-links]
+      (let [next-graph (assoc current-level-graph (second c-link) (first c-link))
+            next-links (conj next-level-links (second c-link))]
+        (if (= end (second c-link))
+          [next-graph]
+          (recur next-graph
+                 next-links
                  links-chan
-                 (a/<! links-chan)))
-        ))
+                 (a/<! links-chan))))
+      )))
 
 (defn build-graph
   [start end]
@@ -92,17 +115,16 @@
     (a/<!! (a/go-loop 
              [links-graph {}
               level-links [(normalize-url start)]
-              next-level-chan (next-level-graph-and-links level-links)]
+              next-level-chan (next-level-graph-and-links level-links normalized-end)]
              (let [next-level (a/<! next-level-chan)]
                (if (not (nil? next-level))
                  (let [merged-graph (merge (first next-level) links-graph)
                        nll (filter #(not (contains? links-graph %)) (distinct (second next-level)))]
-                   (println (count nll))
                    (if (contains? merged-graph normalized-end)
                      merged-graph
                      (recur merged-graph
                             nll
-                            (next-level-graph-and-links (second next-level)))))))
+                            (next-level-graph-and-links (second next-level) normalized-end))))))
              ))
     ))
 
